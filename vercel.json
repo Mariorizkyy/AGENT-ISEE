@@ -1,0 +1,5 @@
+{
+  "installCommand": "pnpm install --config.ignore-scripts=true",
+  "buildCommand": "pnpm --filter ./artifacts/agent-isee run build",
+  "outputDirectory": "artifacts/agent-isee/dist"
+}
