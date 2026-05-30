@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { ethers, BrowserProvider, Contract } from 'ethers';
+import { ethers, BrowserProvider } from 'ethers';
 
 type WalletProvider = {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
@@ -32,10 +32,9 @@ export const OWNER_ADDRESS    = "0x419fa2f1991b06b0ab25bac2341765b38ca16178";
 export const CHAIN_ID         = 1979;
 export const MINT_PRICE       = "0.06";
 
-// Multiple RPC fallbacks
+// ✅ FIX #4: Hapus HTTP fallback — browser block mixed content
 const RPC_URLS = [
   "https://rpc.ritualfoundation.org",
-  "http://rpc.ritualfoundation.org",
 ];
 export const RPC_URL = RPC_URLS[0];
 
@@ -52,7 +51,6 @@ async function getWorkingProvider(): Promise<ethers.JsonRpcProvider> {
       continue;
     }
   }
-  // Return first one as last resort
   return new ethers.JsonRpcProvider(RPC_URLS[0], { chainId: CHAIN_ID, name: "ritual" });
 }
 
@@ -75,231 +73,246 @@ export const ABI = [
   "event ArtRevealed(uint256 indexed tokenId, string imageURI)",
 ];
 
+// ✅ Helper: encode function data tanpa simulation
+function encodeCall(functionSignature: string, args: unknown[] = []): string {
+  const iface = new ethers.Interface(ABI);
+  const funcName = functionSignature.split('(')[0];
+  return iface.encodeFunctionData(funcName, args);
+}
+
+// ✅ Gas limit aman untuk Ritual async precompile calls
+const RITUAL_GAS_LIMIT = 2_000_000n;
+
 export function useBlockchain() {
-  const [provider, setProvider]             = useState<BrowserProvider | null>(null);
-  const [signer, setSigner]                 = useState<ethers.Signer | null>(null);
-  const [account, setAccount]               = useState<string | null>(null);
-  const [contract, setContract]             = useState<Contract | null>(null);
-  const [blockNumber, setBlockNumber]       = useState<number>(0);
-  const [totalSupply, setTotalSupply]       = useState<number>(0);
-  const [isMintOpen, setIsMintOpen]         = useState<boolean>(false);
-  const [isCorrectChain, setIsCorrectChain] = useState<boolean>(false);
-  const [isConnecting, setIsConnecting]     = useState(false);
+  const [provider, setProvider]     = useState<BrowserProvider | null>(null);
+  const [signer, setSigner]         = useState<ethers.Signer | null>(null);
+  const [account, setAccount]       = useState<string | null>(null);
+  const [isMintOpen, setIsMintOpen] = useState<boolean>(false);
+  const [totalSupply, setTotalSupply] = useState<number>(0);
+  const [isConnecting, setIsConnecting] = useState<boolean>(false);
+  const [chainId, setChainId]       = useState<number | null>(null);
+  const [error, setError]           = useState<string | null>(null);
 
-  const isOwner = account?.toLowerCase() === OWNER_ADDRESS.toLowerCase();
-
-  // Poll supply + mint status
-  useEffect(() => {
-    let interval: ReturnType<typeof setInterval>;
-
-    const fetchStats = async () => {
-      try {
-        const readProvider = await getWorkingProvider();
-        const readContract = new Contract(CONTRACT_ADDRESS, ABI, readProvider);
-        const [supply, open] = await Promise.all([
-          readContract.totalSupply().catch(() => 0n),
-          readContract.mintOpen().catch(() => false),
-        ]);
-        setTotalSupply(Number(supply));
-        setIsMintOpen(Boolean(open));
-      } catch { /* ignore */ }
-    };
-
-    fetchStats();
-    interval = setInterval(fetchStats, 15000);
-    return () => clearInterval(interval);
-  }, []);
-
-  // Poll block number
-  useEffect(() => {
-    let interval: ReturnType<typeof setInterval>;
-
-    const fetchBlock = async () => {
-      try {
-        const readProvider = await getWorkingProvider();
-        setBlockNumber(await readProvider.getBlockNumber());
-      } catch { /* ignore */ }
-    };
-
-    fetchBlock();
-    interval = setInterval(fetchBlock, 5000);
-    return () => clearInterval(interval);
-  }, []);
-
-  // Wire up wallet events
-  useEffect(() => {
-    const walletProvider = getWalletProvider();
-    if (!walletProvider) return;
-
-    const browserProvider = new BrowserProvider(walletProvider as never);
-    setProvider(browserProvider);
-
-    browserProvider.getNetwork().then(n => setIsCorrectChain(Number(n.chainId) === CHAIN_ID));
-
-    const handleChainChanged = (cId: string) => setIsCorrectChain(Number(cId) === CHAIN_ID);
-    const handleAccountsChanged = (accounts: string[]) => {
-      if (accounts.length > 0) {
-        setAccount(accounts[0]);
-        browserProvider.getSigner().then(s => setSigner(s));
-      } else {
-        setAccount(null);
-        setSigner(null);
-      }
-    };
-
-    walletProvider.on('chainChanged', handleChainChanged);
-    walletProvider.on('accountsChanged', handleAccountsChanged);
-
-    browserProvider.listAccounts().then(accounts => {
-      if (accounts.length > 0) {
-        const s = accounts[0];
-        setAccount(s.address);
-        setSigner(s);
-      }
-    });
-
-    return () => {
-      walletProvider.removeListener('chainChanged', handleChainChanged);
-      walletProvider.removeListener('accountsChanged', handleAccountsChanged);
-    };
-  }, []);
-
-  useEffect(() => {
-    setContract(signer && isCorrectChain ? new Contract(CONTRACT_ADDRESS, ABI, signer) : null);
-  }, [signer, isCorrectChain]);
-
-  const connectWallet = async () => {
-    if (!provider) return;
-    setIsConnecting(true);
+  // ── Read contract state via read-only provider (tidak perlu wallet) ─────
+  const refreshContractState = async () => {
     try {
-      await provider.send("eth_requestAccounts", []);
-      const s = await provider.getSigner();
-      setSigner(s);
-      setAccount(await s.getAddress());
-      setIsCorrectChain(Number((await provider.getNetwork()).chainId) === CHAIN_ID);
-    } catch { /* user rejected */ }
-    finally { setIsConnecting(false); }
+      const readProvider = await getWorkingProvider();
+      const readContract = new ethers.Contract(CONTRACT_ADDRESS, ABI, readProvider);
+
+      const [mintOpenVal, supplyVal] = await Promise.all([
+        readContract.mintOpen(),
+        readContract.totalSupply(),
+      ]);
+
+      setIsMintOpen(Boolean(mintOpenVal));
+      setTotalSupply(Number(supplyVal));
+    } catch (e: any) {
+      console.warn("Failed to read contract state:", e.message);
+    }
+  };
+
+  useEffect(() => {
+    refreshContractState();
+    const iv = setInterval(refreshContractState, 15000);
+    return () => clearInterval(iv);
+  }, []);
+
+  // ── Wallet connect ──────────────────────────────────────────────────────
+  const connectWallet = async () => {
+    setIsConnecting(true);
+    setError(null);
+    try {
+      const walletProvider = getWalletProvider();
+      if (!walletProvider) throw new Error("No wallet detected. Install MetaMask or OKX Wallet.");
+
+      await walletProvider.request({ method: 'eth_requestAccounts' });
+
+      const browserProvider = new BrowserProvider(walletProvider as any);
+      const network = await browserProvider.getNetwork();
+
+      // ── Switch to Ritual Chain if needed ──
+      if (Number(network.chainId) !== CHAIN_ID) {
+        try {
+          await walletProvider.request({
+            method: 'wallet_switchEthereumChain',
+            params: [{ chainId: `0x${CHAIN_ID.toString(16)}` }],
+          });
+        } catch (switchErr: any) {
+          // Chain belum ditambahkan ke wallet, tambahkan dulu
+          if (switchErr.code === 4902) {
+            await walletProvider.request({
+              method: 'wallet_addEthereumChain',
+              params: [{
+                chainId: `0x${CHAIN_ID.toString(16)}`,
+                chainName: 'Ritual Chain',
+                nativeCurrency: { name: 'RITUAL', symbol: 'RITUAL', decimals: 18 },
+                rpcUrls: [RPC_URL],
+                blockExplorerUrls: ['https://explorer.ritualfoundation.org'],
+              }],
+            });
+          } else {
+            throw switchErr;
+          }
+        }
+      }
+
+      const signerInstance = await browserProvider.getSigner();
+      const accountAddress = await signerInstance.getAddress();
+      const networkAfter   = await browserProvider.getNetwork();
+
+      setProvider(browserProvider);
+      setSigner(signerInstance);
+      setAccount(accountAddress);
+      setChainId(Number(networkAfter.chainId));
+
+      // Listen for account/chain changes
+      walletProvider.on('accountsChanged', (accounts: unknown) => {
+        const accs = accounts as string[];
+        if (accs.length === 0) {
+          setAccount(null); setSigner(null); setProvider(null);
+        } else {
+          setAccount(accs[0]);
+        }
+      });
+
+      walletProvider.on('chainChanged', () => window.location.reload());
+
+    } catch (e: any) {
+      setError(e.shortMessage || e.message);
+    } finally {
+      setIsConnecting(false);
+    }
   };
 
   const disconnectWallet = () => {
     setAccount(null);
     setSigner(null);
-    setContract(null);
-    setIsCorrectChain(false);
+    setProvider(null);
+    setChainId(null);
   };
 
-  const addRitualChain = async () => {
-    const walletProvider = getWalletProvider();
-    if (!walletProvider) return;
-    try {
-      await walletProvider.request({
-        method: 'wallet_addEthereumChain',
-        params: [{
-          chainId: "0x7BB",
-          chainName: "Ritual",
-          rpcUrls: RPC_URLS,
-          nativeCurrency: { name: "RITUAL", symbol: "RITUAL", decimals: 18 },
-        }],
-      });
-    } catch { /* user rejected */ }
+  // ── ✅ FIX #2: mintNFT — SKIP SIMULASI, pakai sendTransaction ──────────
+  //
+  // KENAPA INI PENTING:
+  // AgentISEE.mint() secara internal memanggil LLM precompile (0x0802).
+  // ethers/wagmi akan simulate dulu pakai eth_call sebelum kirim transaksi.
+  // eth_call ke precompile = "call to non-contract" → simulation GAGAL.
+  // Transaksi tidak pernah terkirim, tidak ada error yang jelas.
+  //
+  // SOLUSI: Encode calldata manual + kirim raw tx + set gasLimit manual.
+  // Jangan pernah pakai contract.mint() atau estimateGas() untuk fungsi
+  // yang menyentuh async precompile di Ritual Chain.
+  const mintNFT = async (
+    onStep?: (msg: string) => void
+  ): Promise<ethers.TransactionResponse> => {
+    if (!signer) throw new Error("Wallet tidak terkoneksi");
+    if (!isMintOpen) throw new Error("Mint belum dibuka. Tunggu owner mengaktifkan.");
+
+    const log = (msg: string) => { onStep?.(msg); console.log(msg); };
+
+    log("Encoding calldata mint()...");
+    // ✅ Encode manual — TIDAK trigger eth_call simulation
+    const data = encodeCall("mint()", []);
+
+    log("Mengirim transaksi ke Ritual Chain...");
+    const tx = await signer.sendTransaction({
+      to: CONTRACT_ADDRESS,
+      data,
+      value: ethers.parseEther(MINT_PRICE),
+      // ✅ WAJIB: set gasLimit manual — estimateGas() juga akan gagal
+      // karena juga menggunakan eth_call di balik layar
+      gasLimit: RITUAL_GAS_LIMIT,
+    });
+
+    log(`TX terkirim: ${tx.hash.slice(0, 10)}...`);
+    return tx;
   };
 
-  const mint = async (): Promise<ethers.TransactionResponse> => {
-    if (!provider) throw new Error("No provider");
+  // ── ✅ FIX: setExecutorAndOpen — juga pakai sendTransaction ────────────
+  // Fungsi ini mungkin juga menyentuh precompile secara internal,
+  // jadi gunakan pola yang sama untuk keamanan.
+  const setExecutorAndOpen = async (
+    executorAddress: string
+  ): Promise<ethers.TransactionResponse> => {
+    if (!signer) throw new Error("Wallet tidak terkoneksi");
 
-    let activeContract = contract;
-    if (!activeContract) {
-      try {
-        const s = await provider.getSigner();
-        setSigner(s);
-        activeContract = new Contract(CONTRACT_ADDRESS, ABI, s);
-        setContract(activeContract);
-      } catch {
-        throw new Error("Wallet not ready — please disconnect and reconnect");
-      }
-    }
+    const data = encodeCall("setExecutorAndOpen(address)", [executorAddress]);
 
-    // Chain guard
-    const network = await provider.getNetwork();
-    if (Number(network.chainId) !== CHAIN_ID) {
-      const walletProvider = getWalletProvider();
-      try {
-        await walletProvider?.request({
-          method: 'wallet_switchEthereumChain',
-          params: [{ chainId: '0x7BB' }],
-        });
-      } catch {
-        await addRitualChain();
-      }
-      throw new Error("Switched to Ritual Chain — please try minting again.");
-    }
+    const tx = await signer.sendTransaction({
+      to: CONTRACT_ADDRESS,
+      data,
+      gasLimit: RITUAL_GAS_LIMIT,
+    });
 
-    try {
-      // Get working RPC for fee data
-      const readProvider = await getWorkingProvider();
-      const currentBlock = await readProvider.getBlockNumber();
-      console.log("Current block:", currentBlock);
-
-      // Get gas price from working RPC
-      const feeData = await readProvider.getFeeData();
-      const gasPrice = feeData.gasPrice ?? ethers.parseUnits("2", "gwei");
-
-      if (!signer) throw new Error("Signer not available");
-      const nonce = await provider.getTransactionCount(await signer.getAddress());
-
-      console.log("Sending mint tx with gasPrice:", gasPrice.toString(), "nonce:", nonce);
-
-      return await activeContract.mint({
-        value:    ethers.parseEther("0.06"),
-        gasLimit: BigInt(500000),
-        gasPrice: gasPrice,
-        type:     0,
-        nonce,
-      });
-    } catch (err: any) {
-      console.log("Full error:", JSON.stringify(err, Object.getOwnPropertyNames(err)));
-      const reason =
-        err.reason ??
-        err.revert?.args?.[0] ??
-        err.data?.message ??
-        err.shortMessage ??
-        err.message ??
-        "unknown error";
-      throw new Error(reason);
-    }
+    return tx;
   };
 
-  const checkReveal = async (tokenId: number): Promise<boolean> => {
-    try {
-      const rc = new Contract(CONTRACT_ADDRESS, ABI, await getWorkingProvider());
-      return Boolean(await rc.tokenRevealed(tokenId));
-    } catch { return false; }
-  };
-
-  const setExecutorAndOpen = async (executorAddr: string): Promise<ethers.TransactionResponse> => {
-    if (!contract) throw new Error("Contract not connected");
-    return contract.setExecutorAndOpen(executorAddr, { gasLimit: 150_000 });
-  };
-
+  // ── withdrawRevenue ─────────────────────────────────────────────────────
   const withdrawRevenue = async (): Promise<ethers.TransactionResponse> => {
-    if (!contract) throw new Error("Contract not connected");
-    return contract.withdraw({ gasLimit: 100_000 });
+    if (!signer) throw new Error("Wallet tidak terkoneksi");
+
+    const data = encodeCall("withdraw()", []);
+
+    const tx = await signer.sendTransaction({
+      to: CONTRACT_ADDRESS,
+      data,
+      gasLimit: 500_000n,
+    });
+
+    return tx;
   };
 
+  // ── getContractBalance (read-only, aman pakai call biasa) ───────────────
   const getContractBalance = async (): Promise<string> => {
     try {
-      const rc = new Contract(CONTRACT_ADDRESS, ABI, await getWorkingProvider());
-      const bal = await rc.getBalance();
+      const readProvider = await getWorkingProvider();
+      const readContract = new ethers.Contract(CONTRACT_ADDRESS, ABI, readProvider);
+      const bal = await readContract.getBalance();
       return ethers.formatEther(bal);
-    } catch { return "0"; }
+    } catch {
+      return "0";
+    }
   };
 
+  // ── getTokenData (read-only) ────────────────────────────────────────────
+  const getTokenData = async (tokenId: number) => {
+    try {
+      const readProvider = await getWorkingProvider();
+      const readContract = new ethers.Contract(CONTRACT_ADDRESS, ABI, readProvider);
+      const [prompt, imageURI, revealed] = await Promise.all([
+        readContract.tokenPrompt(tokenId),
+        readContract.tokenImageURI(tokenId),
+        readContract.tokenRevealed(tokenId),
+      ]);
+      return { prompt, imageURI, revealed };
+    } catch {
+      return null;
+    }
+  };
+
+  const isOwner = account?.toLowerCase() === OWNER_ADDRESS.toLowerCase();
+  const isCorrectChain = chainId === CHAIN_ID;
+
   return {
-    provider, account, contract, blockNumber,
-    totalSupply, isMintOpen, isCorrectChain,
-    isOwner, isConnecting,
-    connectWallet, disconnectWallet, addRitualChain,
-    mint, checkReveal,
-    setExecutorAndOpen, withdrawRevenue, getContractBalance,
+    // State
+    provider,
+    signer,
+    account,
+    isMintOpen,
+    totalSupply,
+    isConnecting,
+    chainId,
+    error,
+    isOwner,
+    isCorrectChain,
+    // Actions
+    connectWallet,
+    disconnectWallet,
+    mintNFT,
+    setExecutorAndOpen,
+    withdrawRevenue,
+    getContractBalance,
+    getTokenData,
+    refreshContractState,
   };
 }
