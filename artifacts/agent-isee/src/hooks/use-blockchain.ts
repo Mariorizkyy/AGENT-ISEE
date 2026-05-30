@@ -157,9 +157,17 @@ export function useBlockchain() {
     }
 
     try {
+      // Fetch gas price directly from the RPC so MetaMask's EIP-1559
+      // fee estimator (which fails on custom chains) is never invoked.
+      // Force legacy type-0 transaction with explicit gasPrice.
+      const feeData = await provider.getFeeData();
+      const gasPrice = feeData.gasPrice ?? ethers.parseUnits("2", "gwei");
+
       return await contract.mint({
         value:    ethers.parseEther(MINT_PRICE), // exactly 0.06 RITUAL
         gasLimit: 500_000,
+        gasPrice,           // type-0 legacy tx — no EIP-1559 fee fields
+        type:     0,
       });
     } catch (err: any) {
       // Decode the actual revert reason when available
