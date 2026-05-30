@@ -126,8 +126,10 @@ export function useBlockchain() {
 
     browserProvider.listAccounts().then(accounts => {
       if (accounts.length > 0) {
-        setAccount(accounts[0].address ?? (accounts[0] as unknown as string));
-        browserProvider.getSigner().then(s => setSigner(s));
+        // ethers v6: listAccounts() returns JsonRpcSigner[] — use directly as signer
+        const s = accounts[0];
+        setAccount(s.address);
+        setSigner(s);           // set signer immediately, no second async call
       }
     });
 
@@ -181,8 +183,20 @@ export function useBlockchain() {
   };
 
   const mint = async (): Promise<ethers.TransactionResponse> => {
-    if (!contract) throw new Error("Contract not connected");
-    if (!provider)  throw new Error("No provider");
+    if (!provider) throw new Error("No provider");
+
+    // If contract isn't wired yet (signer race), build it on the fly
+    let activeContract = contract;
+    if (!activeContract) {
+      try {
+        const s = await provider.getSigner();
+        setSigner(s);
+        activeContract = new Contract(CONTRACT_ADDRESS, ABI, s);
+        setContract(activeContract);
+      } catch {
+        throw new Error("Wallet not ready — please disconnect and reconnect");
+      }
+    }
 
     // Chain guard — prompt switch if wrong network
     const network = await provider.getNetwork();
@@ -206,7 +220,7 @@ export function useBlockchain() {
       if (!signer) throw new Error("Signer not available");
       const nonce   = await signer.getNonce();
 
-      return await contract.mint({
+      return await activeContract.mint({
         value:    ethers.parseEther("0.06"),
         gasLimit: BigInt(500000),
         gasPrice: feeData.gasPrice ?? ethers.parseUnits("1", "gwei"),
