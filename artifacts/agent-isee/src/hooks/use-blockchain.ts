@@ -33,11 +33,6 @@ export const CHAIN_ID         = 1979;
 export const MINT_PRICE       = "0.06";
 export const RPC_URL          = "https://rpc.ritualfoundation.org";
 
-// ── mint() function selector + encode manually ───────────────────────────────
-// This bypasses wagmi/ethers simulation entirely — required for Ritual precompiles
-// mint() selector = keccak256("mint()")[0:4] = 0x1249c58b
-const MINT_SELECTOR = "0x1249c58b";
-
 async function getWorkingProvider(): Promise<ethers.JsonRpcProvider> {
   const urls = [
     "https://rpc.ritualfoundation.org",
@@ -88,7 +83,6 @@ export function useBlockchain() {
 
   const isOwner = account?.toLowerCase() === OWNER_ADDRESS.toLowerCase();
 
-  // Poll supply + mint status
   useEffect(() => {
     const fetchStats = async () => {
       try {
@@ -107,7 +101,6 @@ export function useBlockchain() {
     return () => clearInterval(interval);
   }, []);
 
-  // Poll block number
   useEffect(() => {
     const fetchBlock = async () => {
       try {
@@ -120,7 +113,6 @@ export function useBlockchain() {
     return () => clearInterval(interval);
   }, []);
 
-  // Wire up wallet events
   useEffect(() => {
     const walletProvider = getWalletProvider();
     if (!walletProvider) return;
@@ -128,7 +120,7 @@ export function useBlockchain() {
     setProvider(browserProvider);
     browserProvider.getNetwork().then(n => setIsCorrectChain(Number(n.chainId) === CHAIN_ID));
 
-    const handleChainChanged  = (cId: string)    => setIsCorrectChain(Number(cId) === CHAIN_ID);
+    const handleChainChanged = (cId: string) => setIsCorrectChain(Number(cId) === CHAIN_ID);
     const handleAccountsChanged = (accounts: string[]) => {
       if (accounts.length > 0) {
         setAccount(accounts[0]);
@@ -184,17 +176,17 @@ export function useBlockchain() {
     } catch { /* user rejected */ }
   };
 
-  // ── MINT — bypass simulation entirely (required for Ritual precompiles) ──────
-  // Article ref: https://x.com/tutubearrr — Pitfall #1
-  // wagmi/ethers simulateContract fails on async precompile calls.
-  // Fix: encode calldata manually + sendTransaction with explicit gas.
-  // No eth_call simulation. No gas estimation. Raw tx only.
+  // ── MINT ─────────────────────────────────────────────────────────────────────
+  // KEY: use eth_sendTransaction directly via wallet provider
+  // This bypasses ALL ethers/wagmi simulation — required for Ritual async precompiles
+  // Reference: https://x.com/tutubearrr — Pitfall #1
   const mint = async (): Promise<ethers.TransactionResponse> => {
     const walletProvider = getWalletProvider();
-    if (!walletProvider) throw new Error("No wallet found");
+    if (!walletProvider) throw new Error("No wallet found. Install MetaMask or OKX Wallet.");
+
+    const browserProvider = new BrowserProvider(walletProvider as never);
 
     // Chain guard
-    const browserProvider = new BrowserProvider(walletProvider as never);
     const network = await browserProvider.getNetwork();
     if (Number(network.chainId) !== CHAIN_ID) {
       try {
@@ -203,44 +195,61 @@ export function useBlockchain() {
           params: [{ chainId: '0x7BB' }],
         });
       } catch {
-        await addRitualChain();
+        await walletProvider.request({
+          method: 'wallet_addEthereumChain',
+          params: [{
+            chainId: "0x7BB",
+            chainName: "Ritual",
+            rpcUrls: [RPC_URL],
+            nativeCurrency: { name: "RITUAL", symbol: "RITUAL", decimals: 18 },
+          }],
+        });
       }
-      throw new Error("Switched to Ritual Chain — please try again.");
+      throw new Error("Switched to Ritual Chain — please try minting again.");
     }
 
-    try {
-      const s = await browserProvider.getSigner();
-      const address = await s.getAddress();
+    // Get accounts
+    const accounts = await walletProvider.request({
+      method: 'eth_accounts',
+    }) as string[];
 
-      console.log("Minting from:", address);
-      console.log("Contract:", CONTRACT_ADDRESS);
-      console.log("Value: 0.06 RITUAL");
-
-      // ── KEY FIX: send raw transaction, NO simulation ─────────────────────
-      // encodeFunctionData manually — mint() has no args, just selector
-      // This completely skips ethers/wagmi eth_call simulation
-      const tx = await s.sendTransaction({
-        to:       CONTRACT_ADDRESS,
-        data:     MINT_SELECTOR,           // mint() = 0x1249c58b
-        value:    ethers.parseEther("0.06"),
-        gasLimit: BigInt(2_000_000),       // 2M gas — safe for precompile calls
-        type:     0,                       // legacy tx — bypass EIP-1559 estimation
-      });
-
-      console.log("TX sent:", tx.hash);
-      return tx;
-
-    } catch (err: any) {
-      console.log("Mint error:", JSON.stringify(err, Object.getOwnPropertyNames(err)));
-      const reason =
-        err.reason ??
-        err.revert?.args?.[0] ??
-        err.data?.message ??
-        err.shortMessage ??
-        err.message ??
-        "Transaction failed";
-      throw new Error(reason);
+    if (!accounts || accounts.length === 0) {
+      await walletProvider.request({ method: 'eth_requestAccounts', params: [] });
+      throw new Error("Please connect your wallet first.");
     }
+
+    const from     = accounts[0];
+    // 0.06 RITUAL in hex wei
+    const value    = "0x" + ethers.parseEther("0.06").toString(16);
+    // 2,000,000 gas in hex — safe for Ritual async precompile calls
+    const gasLimit = "0x" + BigInt(2_000_000).toString(16);
+    // mint() function selector — keccak256("mint()")[0:4]
+    const data     = "0x1249c58b";
+
+    console.log("Sending mint via eth_sendTransaction (no simulation)");
+    console.log("From:", from);
+    console.log("To:", CONTRACT_ADDRESS);
+    console.log("Value:", value, "(0.06 RITUAL)");
+    console.log("Gas:", gasLimit);
+
+    // Send raw transaction — wallet handles signing, NO eth_call simulation
+    const txHash = await walletProvider.request({
+      method: 'eth_sendTransaction',
+      params: [{
+        from,
+        to:    CONTRACT_ADDRESS,
+        data,
+        value,
+        gas:   gasLimit,
+      }],
+    }) as string;
+
+    console.log("TX submitted:", txHash);
+
+    // Fetch full tx object for return
+    const tx = await browserProvider.getTransaction(txHash);
+    if (!tx) throw new Error("TX sent but could not fetch details: " + txHash);
+    return tx;
   };
 
   const checkReveal = async (tokenId: number): Promise<boolean> => {
