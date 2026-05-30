@@ -1,14 +1,33 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { ethers, BrowserProvider, Contract } from 'ethers';
+
+// ── Wallet provider type shared between MetaMask and OKX ──────────────────────
+type WalletProvider = {
+  request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+  on: (event: string, handler: (...args: unknown[]) => void) => void;
+  removeListener: (event: string, handler: (...args: unknown[]) => void) => void;
+};
 
 declare global {
   interface Window {
-    ethereum?: {
-      request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
-      on: (event: string, handler: (...args: unknown[]) => void) => void;
-      removeListener: (event: string, handler: (...args: unknown[]) => void) => void;
-    };
+    ethereum?: WalletProvider;
+    okxwallet?: WalletProvider;
   }
+}
+
+/** OKX Wallet first, MetaMask fallback, null if neither present. */
+function getWalletProvider(): WalletProvider | null {
+  if (typeof window !== 'undefined') {
+    if (typeof window.okxwallet !== 'undefined') return window.okxwallet!;
+    if (typeof window.ethereum  !== 'undefined') return window.ethereum!;
+  }
+  return null;
+}
+
+/** Shorten an address to 0x1234…abcd format. */
+export function shortenAddress(addr: string): string {
+  if (!addr) return '';
+  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
 export const CONTRACT_ADDRESS = "0xaC9443A8FE8D6CABBcA820A66FAE2810EC8e8688";
@@ -37,19 +56,19 @@ export const ABI = [
 ];
 
 export function useBlockchain() {
-  const [provider, setProvider]           = useState<BrowserProvider | null>(null);
-  const [signer, setSigner]               = useState<ethers.Signer | null>(null);
-  const [account, setAccount]             = useState<string | null>(null);
-  const [contract, setContract]           = useState<Contract | null>(null);
-  const [blockNumber, setBlockNumber]     = useState<number>(0);
-  const [totalSupply, setTotalSupply]     = useState<number>(0);
-  const [isMintOpen, setIsMintOpen]       = useState<boolean>(false);
+  const [provider, setProvider]             = useState<BrowserProvider | null>(null);
+  const [signer, setSigner]                 = useState<ethers.Signer | null>(null);
+  const [account, setAccount]               = useState<string | null>(null);
+  const [contract, setContract]             = useState<Contract | null>(null);
+  const [blockNumber, setBlockNumber]       = useState<number>(0);
+  const [totalSupply, setTotalSupply]       = useState<number>(0);
+  const [isMintOpen, setIsMintOpen]         = useState<boolean>(false);
   const [isCorrectChain, setIsCorrectChain] = useState<boolean>(false);
-  const [isConnecting, setIsConnecting]   = useState(false);
+  const [isConnecting, setIsConnecting]     = useState(false);
 
   const isOwner = account?.toLowerCase() === OWNER_ADDRESS.toLowerCase();
 
-  // Poll supply + mint status
+  // ── Poll supply + mint status (read-only, no wallet needed) ─────────────────
   useEffect(() => {
     const readProvider = new ethers.JsonRpcProvider(RPC_URL);
     const readContract = new Contract(CONTRACT_ADDRESS, ABI, readProvider);
@@ -70,7 +89,7 @@ export function useBlockchain() {
     return () => clearInterval(interval);
   }, []);
 
-  // Poll block number
+  // ── Poll block number ────────────────────────────────────────────────────────
   useEffect(() => {
     const readProvider = new ethers.JsonRpcProvider(RPC_URL);
     const fetchBlock = async () => {
@@ -81,43 +100,48 @@ export function useBlockchain() {
     return () => clearInterval(interval);
   }, []);
 
-  // Wire up MetaMask
+  // ── Wire up wallet events (MetaMask or OKX) ──────────────────────────────────
   useEffect(() => {
-    if (!window.ethereum) return;
-    const browserProvider = new BrowserProvider(window.ethereum);
+    const walletProvider = getWalletProvider();
+    if (!walletProvider) return;
+
+    const browserProvider = new BrowserProvider(walletProvider as never);
     setProvider(browserProvider);
 
     browserProvider.getNetwork().then(n => setIsCorrectChain(Number(n.chainId) === CHAIN_ID));
 
-    const handleChainChanged    = (cId: string) => setIsCorrectChain(Number(cId) === CHAIN_ID);
+    const handleChainChanged = (cId: string) => setIsCorrectChain(Number(cId) === CHAIN_ID);
     const handleAccountsChanged = (accounts: string[]) => {
       if (accounts.length > 0) {
         setAccount(accounts[0]);
         browserProvider.getSigner().then(s => setSigner(s));
       } else {
-        setAccount(null); setSigner(null);
+        setAccount(null);
+        setSigner(null);
       }
     };
 
-    window.ethereum.on('chainChanged', handleChainChanged);
-    window.ethereum.on('accountsChanged', handleAccountsChanged);
+    walletProvider.on('chainChanged', handleChainChanged);
+    walletProvider.on('accountsChanged', handleAccountsChanged);
 
     browserProvider.listAccounts().then(accounts => {
       if (accounts.length > 0) {
-        setAccount(accounts[0].address ?? accounts[0]);
+        setAccount(accounts[0].address ?? (accounts[0] as unknown as string));
         browserProvider.getSigner().then(s => setSigner(s));
       }
     });
 
     return () => {
-      window.ethereum?.removeListener('chainChanged', handleChainChanged);
-      window.ethereum?.removeListener('accountsChanged', handleAccountsChanged);
+      walletProvider.removeListener('chainChanged', handleChainChanged);
+      walletProvider.removeListener('accountsChanged', handleAccountsChanged);
     };
   }, []);
 
   useEffect(() => {
     setContract(signer && isCorrectChain ? new Contract(CONTRACT_ADDRESS, ABI, signer) : null);
   }, [signer, isCorrectChain]);
+
+  // ── Actions ──────────────────────────────────────────────────────────────────
 
   const connectWallet = async () => {
     if (!provider) return;
@@ -132,24 +156,39 @@ export function useBlockchain() {
     finally { setIsConnecting(false); }
   };
 
+  /** Clear local wallet state — does NOT call any wallet API. */
+  const disconnectWallet = () => {
+    setAccount(null);
+    setSigner(null);
+    setContract(null);
+    setIsCorrectChain(false);
+  };
+
   const addRitualChain = async () => {
-    if (!window.ethereum) return;
+    const walletProvider = getWalletProvider();
+    if (!walletProvider) return;
     try {
-      await window.ethereum.request({
+      await walletProvider.request({
         method: 'wallet_addEthereumChain',
-        params: [{ chainId: "0x7BB", chainName: "Ritual", rpcUrls: [RPC_URL], nativeCurrency: { name: "RITUAL", symbol: "RITUAL", decimals: 18 } }],
+        params: [{
+          chainId: "0x7BB",
+          chainName: "Ritual",
+          rpcUrls: [RPC_URL],
+          nativeCurrency: { name: "RITUAL", symbol: "RITUAL", decimals: 18 },
+        }],
       });
-    } catch { /* ignore */ }
+    } catch { /* user rejected */ }
   };
 
   const mint = async (): Promise<ethers.TransactionResponse> => {
     if (!contract) throw new Error("Contract not connected");
     if (!provider)  throw new Error("No provider");
 
-    // Verify chain before sending — prompt switch if wrong
+    // Chain guard — prompt switch if wrong network
     const network = await provider.getNetwork();
     if (Number(network.chainId) !== CHAIN_ID) {
-      await window.ethereum?.request({
+      const walletProvider = getWalletProvider();
+      await walletProvider?.request({
         method: 'wallet_switchEthereumChain',
         params: [{ chainId: '0x7BB' }],
       });
@@ -157,20 +196,18 @@ export function useBlockchain() {
     }
 
     try {
-      // Fetch gas price directly from the RPC so MetaMask's EIP-1559
-      // fee estimator (which fails on custom chains) is never invoked.
-      // Force legacy type-0 transaction with explicit gasPrice.
+      // Fetch gasPrice directly from the Ritual RPC so MetaMask's EIP-1559
+      // fee estimator (which fails on custom chains) is bypassed.
       const feeData = await provider.getFeeData();
       const gasPrice = feeData.gasPrice ?? ethers.parseUnits("2", "gwei");
 
       return await contract.mint({
-        value:    ethers.parseEther(MINT_PRICE), // exactly 0.06 RITUAL
+        value:    ethers.parseEther(MINT_PRICE),
         gasLimit: 500_000,
-        gasPrice,           // type-0 legacy tx — no EIP-1559 fee fields
-        type:     0,
+        gasPrice,
+        type:     0,          // legacy tx — no EIP-1559 fee fields
       });
     } catch (err: any) {
-      // Decode the actual revert reason when available
       const reason =
         err.reason ??
         err.revert?.args?.[0] ??
@@ -189,7 +226,8 @@ export function useBlockchain() {
     } catch { return false; }
   };
 
-  // Owner-only actions
+  // ── Owner-only ───────────────────────────────────────────────────────────────
+
   const setExecutorAndOpen = async (executorAddr: string): Promise<ethers.TransactionResponse> => {
     if (!contract) throw new Error("Contract not connected");
     return contract.setExecutorAndOpen(executorAddr, { gasLimit: 150_000 });
@@ -212,7 +250,7 @@ export function useBlockchain() {
     provider, account, contract, blockNumber,
     totalSupply, isMintOpen, isCorrectChain,
     isOwner, isConnecting,
-    connectWallet, addRitualChain,
+    connectWallet, disconnectWallet, addRitualChain,
     mint, checkReveal,
     setExecutorAndOpen, withdrawRevenue, getContractBalance,
   };
