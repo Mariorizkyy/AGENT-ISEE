@@ -174,7 +174,14 @@ export function MintPanel() {
         }
       }, 4000);
     } catch (err: any) {
-      setMintSteps(prev => [...prev, `ERR: ${err.shortMessage || err.message || "tx failed"}`]);
+      const reason =
+        err.reason ??
+        err.revert?.args?.[0] ??
+        err.data?.message ??
+        err.shortMessage ??
+        err.message ??
+        "tx failed";
+      setMintSteps(prev => [...prev, `ERR: ${reason}`]);
       setIsMinting(false);
     }
   };
