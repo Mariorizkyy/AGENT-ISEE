@@ -32,7 +32,7 @@ export const OWNER_ADDRESS    = "0x419fa2f1991b06b0ab25bac2341765b38ca16178";
 export const CHAIN_ID         = 1979;
 export const MINT_PRICE       = "0.06";
 
-// ✅ FIX #4: Hapus HTTP fallback — browser block mixed content
+// ✅ FIX: Hapus HTTP fallback — browser block mixed content
 const RPC_URLS = [
   "https://rpc.ritualfoundation.org",
 ];
@@ -138,7 +138,6 @@ export function useBlockchain() {
             params: [{ chainId: `0x${CHAIN_ID.toString(16)}` }],
           });
         } catch (switchErr: any) {
-          // Chain belum ditambahkan ke wallet, tambahkan dulu
           if (switchErr.code === 4902) {
             await walletProvider.request({
               method: 'wallet_addEthereumChain',
@@ -165,7 +164,6 @@ export function useBlockchain() {
       setAccount(accountAddress);
       setChainId(Number(networkAfter.chainId));
 
-      // Listen for account/chain changes
       walletProvider.on('accountsChanged', (accounts: unknown) => {
         const accs = accounts as string[];
         if (accs.length === 0) {
@@ -191,50 +189,35 @@ export function useBlockchain() {
     setChainId(null);
   };
 
-  // ── ✅ FIX #2: mintNFT — SKIP SIMULASI, pakai sendTransaction ──────────
-  //
-  // KENAPA INI PENTING:
-  // AgentISEE.mint() secara internal memanggil LLM precompile (0x0802).
-  // ethers/wagmi akan simulate dulu pakai eth_call sebelum kirim transaksi.
-  // eth_call ke precompile = "call to non-contract" → simulation GAGAL.
-  // Transaksi tidak pernah terkirim, tidak ada error yang jelas.
-  //
-  // SOLUSI: Encode calldata manual + kirim raw tx + set gasLimit manual.
-  // Jangan pernah pakai contract.mint() atau estimateGas() untuk fungsi
-  // yang menyentuh async precompile di Ritual Chain.
+  // ── ✅ FIX: mintNFT — SKIP SIMULASI, pakai sendTransaction ──────────
   const mintNFT = async (
     onStep?: (msg: string) => void
   ): Promise<ethers.TransactionResponse> => {
-    if (!signer) throw new Error("Wallet tidak terkoneksi");
-    if (!isMintOpen) throw new Error("Mint belum dibuka. Tunggu owner mengaktifkan.");
+    if (!signer) throw new Error("Wallet not connected");
+    if (!isMintOpen) throw new Error("Mint is not open yet.");
 
     const log = (msg: string) => { onStep?.(msg); console.log(msg); };
 
     log("Encoding calldata mint()...");
-    // ✅ Encode manual — TIDAK trigger eth_call simulation
     const data = encodeCall("mint()", []);
 
-    log("Mengirim transaksi ke Ritual Chain...");
+    log("Sending transaction to Ritual Chain...");
     const tx = await signer.sendTransaction({
       to: CONTRACT_ADDRESS,
       data,
       value: ethers.parseEther(MINT_PRICE),
-      // ✅ WAJIB: set gasLimit manual — estimateGas() juga akan gagal
-      // karena juga menggunakan eth_call di balik layar
       gasLimit: RITUAL_GAS_LIMIT,
     });
 
-    log(`TX terkirim: ${tx.hash.slice(0, 10)}...`);
+    log(`TX sent: ${tx.hash.slice(0, 10)}...`);
     return tx;
   };
 
   // ── ✅ FIX: setExecutorAndOpen — juga pakai sendTransaction ────────────
-  // Fungsi ini mungkin juga menyentuh precompile secara internal,
-  // jadi gunakan pola yang sama untuk keamanan.
   const setExecutorAndOpen = async (
     executorAddress: string
   ): Promise<ethers.TransactionResponse> => {
-    if (!signer) throw new Error("Wallet tidak terkoneksi");
+    if (!signer) throw new Error("Wallet not connected");
 
     const data = encodeCall("setExecutorAndOpen(address)", [executorAddress]);
 
@@ -249,7 +232,7 @@ export function useBlockchain() {
 
   // ── withdrawRevenue ─────────────────────────────────────────────────────
   const withdrawRevenue = async (): Promise<ethers.TransactionResponse> => {
-    if (!signer) throw new Error("Wallet tidak terkoneksi");
+    if (!signer) throw new Error("Wallet not connected");
 
     const data = encodeCall("withdraw()", []);
 
@@ -262,7 +245,7 @@ export function useBlockchain() {
     return tx;
   };
 
-  // ── getContractBalance (read-only, aman pakai call biasa) ───────────────
+  // ── getContractBalance ───────────────────────────────
   const getContractBalance = async (): Promise<string> => {
     try {
       const readProvider = await getWorkingProvider();
@@ -274,7 +257,7 @@ export function useBlockchain() {
     }
   };
 
-  // ── getTokenData (read-only) ────────────────────────────────────────────
+  // ── getTokenData ────────────────────────────────────────────
   const getTokenData = async (tokenId: number) => {
     try {
       const readProvider = await getWorkingProvider();
@@ -294,7 +277,6 @@ export function useBlockchain() {
   const isCorrectChain = chainId === CHAIN_ID;
 
   return {
-    // State
     provider,
     signer,
     account,
@@ -305,7 +287,6 @@ export function useBlockchain() {
     error,
     isOwner,
     isCorrectChain,
-    // Actions
     connectWallet,
     disconnectWallet,
     mintNFT,
