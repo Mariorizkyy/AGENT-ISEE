@@ -144,7 +144,34 @@ export function useBlockchain() {
 
   const mint = async (): Promise<ethers.TransactionResponse> => {
     if (!contract) throw new Error("Contract not connected");
-    return contract.mint({ value: ethers.parseEther(MINT_PRICE) });
+    if (!provider)  throw new Error("No provider");
+
+    // Verify chain before sending — prompt switch if wrong
+    const network = await provider.getNetwork();
+    if (Number(network.chainId) !== CHAIN_ID) {
+      await window.ethereum?.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: '0x7BB' }],
+      });
+      throw new Error("Switched to Ritual Chain — please try minting again.");
+    }
+
+    try {
+      return await contract.mint({
+        value:    ethers.parseEther(MINT_PRICE), // exactly 0.06 RITUAL
+        gasLimit: 500_000,
+      });
+    } catch (err: any) {
+      // Decode the actual revert reason when available
+      const reason =
+        err.reason ??
+        err.revert?.args?.[0] ??
+        err.data?.message ??
+        err.shortMessage ??
+        err.message ??
+        "unknown error";
+      throw new Error(reason);
+    }
   };
 
   const checkReveal = async (tokenId: number): Promise<boolean> => {
