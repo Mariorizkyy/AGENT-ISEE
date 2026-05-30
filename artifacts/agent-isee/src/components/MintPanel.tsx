@@ -34,8 +34,18 @@ export function TerminalLog({ steps, isError = false }: { steps: string[]; isErr
 }
 
 // ─── Admin Panel (Owner Only) ─────────────────────────────────────────────────
-function AdminPanel() {
-  const { isMintOpen, setExecutorAndOpen, withdrawRevenue, getContractBalance } = useBlockchain();
+// ✅ FIX: Menerima functions dari parent komponen agar state signer-nya sama dan tidak terpisah
+function AdminPanel({
+  isMintOpen,
+  setExecutorAndOpen,
+  withdrawRevenue,
+  getContractBalance
+}: {
+  isMintOpen: boolean;
+  setExecutorAndOpen: (addr: string) => Promise<ethers.TransactionResponse>;
+  withdrawRevenue: () => Promise<ethers.TransactionResponse>;
+  getContractBalance: () => Promise<string>;
+}) {
   const [executorInput, setExecutorInput] = useState('');
   const [balance, setBalance]             = useState('0');
   const [activating, setActivating]       = useState(false);
@@ -57,7 +67,7 @@ function AdminPanel() {
     refresh();
     const iv = setInterval(refresh, 15000);
     return () => clearInterval(iv);
-  }, []);
+  }, [getContractBalance]);
 
   // Update log when mintOpen changes
   useEffect(() => {
@@ -116,7 +126,6 @@ function AdminPanel() {
 
   return (
     <div className="mt-6 border border-primary/30 bg-black/60 p-5 space-y-4 rounded-sm">
-
       {/* Panel header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -244,6 +253,9 @@ export function MintPanel() {
     connectWallet,
     disconnectWallet,
     mintNFT,
+    setExecutorAndOpen,
+    withdrawRevenue,
+    getContractBalance,
     refreshContractState,
   } = useBlockchain();
 
@@ -465,7 +477,14 @@ export function MintPanel() {
       )}
 
       {/* ── Owner Admin Panel ── */}
-      {isOwner && <AdminPanel />}
+      {isOwner && (
+        <AdminPanel
+          isMintOpen={isMintOpen}
+          setExecutorAndOpen={setExecutorAndOpen}
+          withdrawRevenue={withdrawRevenue}
+          getContractBalance={getContractBalance}
+        />
+      )}
 
       {/* ── Footer ── */}
       <p className="text-center text-primary/20 font-mono text-[10px] pb-2">
