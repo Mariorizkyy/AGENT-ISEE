@@ -196,18 +196,25 @@ export function useBlockchain() {
     }
 
     try {
-      // Fetch gasPrice directly from the Ritual RPC so MetaMask's EIP-1559
-      // fee estimator (which fails on custom chains) is bypassed.
+      // Verify RPC connection before sending
+      const currentBlock = await provider.getBlockNumber();
+      console.log("Current block:", currentBlock);
+
+      // Fetch gasPrice from RPC; fall back to 1 gwei if unavailable.
+      // Explicit nonce + type-0 tx completely bypasses ethers/MetaMask gas estimation.
       const feeData = await provider.getFeeData();
-      const gasPrice = feeData.gasPrice ?? ethers.parseUnits("2", "gwei");
+      if (!signer) throw new Error("Signer not available");
+      const nonce   = await signer.getNonce();
 
       return await contract.mint({
-        value:    ethers.parseEther(MINT_PRICE),
-        gasLimit: 500_000,
-        gasPrice,
-        type:     0,          // legacy tx — no EIP-1559 fee fields
+        value:    ethers.parseEther("0.06"),
+        gasLimit: BigInt(500000),
+        gasPrice: feeData.gasPrice ?? ethers.parseUnits("1", "gwei"),
+        type:     0,
+        nonce,
       });
     } catch (err: any) {
+      console.log("Full error:", JSON.stringify(err, Object.getOwnPropertyNames(err)));
       const reason =
         err.reason ??
         err.revert?.args?.[0] ??
