@@ -32,7 +32,6 @@ export const OWNER_ADDRESS    = "0x419fa2f1991b06b0ab25bac2341765b38ca16178";
 export const CHAIN_ID         = 1979;
 export const MINT_PRICE       = "0.06";
 
-// ✅ FIX: Hapus HTTP fallback — browser block mixed content
 const RPC_URLS = [
   "https://rpc.ritualfoundation.org",
 ];
@@ -62,26 +61,18 @@ export const ABI = [
   "function tokenImageURI(uint256) view returns (string)",
   "function tokenRevealed(uint256) view returns (bool)",
   "function setExecutorAndOpen(address _executor) external",
-  "function setExecutor(address _executor) external",
-  "function openMint() external",
-  "function pauseMint() external",
   "function withdraw() external",
   "function getBalance() view returns (uint256)",
-  "function owner() view returns (address)",
-  "event MintInitiated(uint256 indexed tokenId, address indexed minter, bytes32 llmJobId)",
-  "event PromptGenerated(uint256 indexed tokenId, string prompt, bytes32 imgJobId)",
-  "event ArtRevealed(uint256 indexed tokenId, string imageURI)",
 ];
 
-// ✅ Helper: encode function data tanpa simulation
 function encodeCall(functionSignature: string, args: unknown[] = []): string {
   const iface = new ethers.Interface(ABI);
   const funcName = functionSignature.split('(')[0];
   return iface.encodeFunctionData(funcName, args);
 }
 
-// ✅ Gas limit aman untuk Ritual async precompile calls
-const RITUAL_GAS_LIMIT = 2_000_000n;
+// Format Hex untuk gas: 2.000.000 (Ritual safe limit)
+const RITUAL_GAS_HEX = "0x1e8480"; 
 
 export function useBlockchain() {
   const [provider, setProvider]     = useState<BrowserProvider | null>(null);
@@ -93,7 +84,6 @@ export function useBlockchain() {
   const [chainId, setChainId]       = useState<number | null>(null);
   const [error, setError]           = useState<string | null>(null);
 
-  // ── Read contract state via read-only provider (tidak perlu wallet) ─────
   const refreshContractState = async () => {
     try {
       const readProvider = await getWorkingProvider();
@@ -117,20 +107,18 @@ export function useBlockchain() {
     return () => clearInterval(iv);
   }, []);
 
-  // ── Wallet connect ──────────────────────────────────────────────────────
   const connectWallet = async () => {
     setIsConnecting(true);
     setError(null);
     try {
       const walletProvider = getWalletProvider();
-      if (!walletProvider) throw new Error("No wallet detected. Install MetaMask or OKX Wallet.");
+      if (!walletProvider) throw new Error("No wallet detected.");
 
       await walletProvider.request({ method: 'eth_requestAccounts' });
 
       const browserProvider = new BrowserProvider(walletProvider as any);
       const network = await browserProvider.getNetwork();
 
-      // ── Switch to Ritual Chain if needed ──
       if (Number(network.chainId) !== CHAIN_ID) {
         try {
           await walletProvider.request({
@@ -172,9 +160,7 @@ export function useBlockchain() {
           setAccount(accs[0]);
         }
       });
-
       walletProvider.on('chainChanged', () => window.location.reload());
-
     } catch (e: any) {
       setError(e.shortMessage || e.message);
     } finally {
@@ -183,81 +169,100 @@ export function useBlockchain() {
   };
 
   const disconnectWallet = () => {
-    setAccount(null);
-    setSigner(null);
-    setProvider(null);
-    setChainId(null);
+    setAccount(null); setSigner(null); setProvider(null); setChainId(null);
   };
 
-  // ── ✅ FIX: mintNFT — SKIP SIMULASI, pakai sendTransaction ──────────
+  // ── ✅ FIX ULTIMATE: Bypass Ethers.js sepenuhnya untuk kirim Tx ──────────
   const mintNFT = async (
     onStep?: (msg: string) => void
-  ): Promise<ethers.TransactionResponse> => {
-    if (!signer) throw new Error("Wallet not connected");
+  ): Promise<{ hash: string, wait: () => Promise<any> }> => {
+    if (!account || !provider) throw new Error("Wallet not connected");
     if (!isMintOpen) throw new Error("Mint is not open yet.");
 
     const log = (msg: string) => { onStep?.(msg); console.log(msg); };
+    const walletProvider = getWalletProvider();
+    if (!walletProvider) throw new Error("Provider lost");
 
     log("Encoding calldata mint()...");
     const data = encodeCall("mint()", []);
+    const valueHex = "0x" + ethers.parseEther(MINT_PRICE).toString(16);
 
-    log("Sending transaction to Ritual Chain...");
-    const tx = await signer.sendTransaction({
-      to: CONTRACT_ADDRESS,
-      data,
-      value: ethers.parseEther(MINT_PRICE),
-      gasLimit: RITUAL_GAS_LIMIT,
-    });
+    log("Sending RAW transaction directly to wallet (EIP-1193)...");
+    
+    // Kirim raw RPC, mencegah MetaMask/OKX ditipu oleh format Ethers.js
+    const txHash = await walletProvider.request({
+      method: 'eth_sendTransaction',
+      params: [{
+        from: account,
+        to: CONTRACT_ADDRESS,
+        data: data,
+        value: valueHex,
+        gas: RITUAL_GAS_HEX
+      }]
+    }) as string;
 
-    log(`TX sent: ${tx.hash.slice(0, 10)}...`);
-    return tx;
+    log(`TX sent: ${txHash.slice(0, 10)}...`);
+    
+    return {
+      hash: txHash,
+      wait: async () => provider.waitForTransaction(txHash)
+    };
   };
 
-  // ── ✅ FIX: setExecutorAndOpen — juga pakai sendTransaction ────────────
   const setExecutorAndOpen = async (
     executorAddress: string
-  ): Promise<ethers.TransactionResponse> => {
-    if (!signer) throw new Error("Wallet not connected");
+  ): Promise<{ hash: string, wait: () => Promise<any> }> => {
+    if (!account || !provider) throw new Error("Wallet not connected");
 
     const data = encodeCall("setExecutorAndOpen(address)", [executorAddress]);
+    const walletProvider = getWalletProvider();
 
-    const tx = await signer.sendTransaction({
-      to: CONTRACT_ADDRESS,
-      data,
-      gasLimit: RITUAL_GAS_LIMIT,
-    });
+    const txHash = await walletProvider?.request({
+      method: 'eth_sendTransaction',
+      params: [{
+        from: account,
+        to: CONTRACT_ADDRESS,
+        data: data,
+        gas: RITUAL_GAS_HEX
+      }]
+    }) as string;
 
-    return tx;
+    return {
+      hash: txHash,
+      wait: async () => provider.waitForTransaction(txHash)
+    };
   };
 
-  // ── withdrawRevenue ─────────────────────────────────────────────────────
-  const withdrawRevenue = async (): Promise<ethers.TransactionResponse> => {
-    if (!signer) throw new Error("Wallet not connected");
+  const withdrawRevenue = async (): Promise<{ hash: string, wait: () => Promise<any> }> => {
+    if (!account || !provider) throw new Error("Wallet not connected");
 
     const data = encodeCall("withdraw()", []);
+    const walletProvider = getWalletProvider();
 
-    const tx = await signer.sendTransaction({
-      to: CONTRACT_ADDRESS,
-      data,
-      gasLimit: 500_000n,
-    });
+    const txHash = await walletProvider?.request({
+      method: 'eth_sendTransaction',
+      params: [{
+        from: account,
+        to: CONTRACT_ADDRESS,
+        data: data,
+        gas: "0x7a120" // 500,000 hex
+      }]
+    }) as string;
 
-    return tx;
+    return {
+      hash: txHash,
+      wait: async () => provider.waitForTransaction(txHash)
+    };
   };
 
-  // ── getContractBalance ───────────────────────────────
   const getContractBalance = async (): Promise<string> => {
     try {
       const readProvider = await getWorkingProvider();
       const readContract = new ethers.Contract(CONTRACT_ADDRESS, ABI, readProvider);
-      const bal = await readContract.getBalance();
-      return ethers.formatEther(bal);
-    } catch {
-      return "0";
-    }
+      return ethers.formatEther(await readContract.getBalance());
+    } catch { return "0"; }
   };
 
-  // ── getTokenData ────────────────────────────────────────────
   const getTokenData = async (tokenId: number) => {
     try {
       const readProvider = await getWorkingProvider();
@@ -268,32 +273,16 @@ export function useBlockchain() {
         readContract.tokenRevealed(tokenId),
       ]);
       return { prompt, imageURI, revealed };
-    } catch {
-      return null;
-    }
+    } catch { return null; }
   };
 
   const isOwner = account?.toLowerCase() === OWNER_ADDRESS.toLowerCase();
   const isCorrectChain = chainId === CHAIN_ID;
 
   return {
-    provider,
-    signer,
-    account,
-    isMintOpen,
-    totalSupply,
-    isConnecting,
-    chainId,
-    error,
-    isOwner,
-    isCorrectChain,
-    connectWallet,
-    disconnectWallet,
-    mintNFT,
-    setExecutorAndOpen,
-    withdrawRevenue,
-    getContractBalance,
-    getTokenData,
-    refreshContractState,
+    provider, signer, account, isMintOpen, totalSupply, isConnecting,
+    chainId, error, isOwner, isCorrectChain,
+    connectWallet, disconnectWallet, mintNFT, setExecutorAndOpen,
+    withdrawRevenue, getContractBalance, getTokenData, refreshContractState,
   };
 }
