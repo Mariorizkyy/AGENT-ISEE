@@ -33,6 +33,13 @@ export const CHAIN_ID         = 1979;
 export const MINT_PRICE       = "0.06";
 export const RPC_URL          = "https://rpc.ritualfoundation.org";
 
+// mint() selector = keccak256("mint()")[0:4]
+const MINT_SELECTOR = "0x1249c58b";
+
+// Gas values hardcoded — Ritual RPC does not support eth_estimateGas for precompile calls
+const RITUAL_GAS_LIMIT = "0x1E8480";  // 2,000,000 in hex
+const RITUAL_GAS_PRICE = "0x3B9ACA00"; // 1 gwei in hex
+
 async function getWorkingProvider(): Promise<ethers.JsonRpcProvider> {
   const urls = [
     "https://rpc.ritualfoundation.org",
@@ -86,61 +93,59 @@ export function useBlockchain() {
   useEffect(() => {
     const fetchStats = async () => {
       try {
-        const readProvider = await getWorkingProvider();
-        const readContract = new Contract(CONTRACT_ADDRESS, ABI, readProvider);
+        const rp = await getWorkingProvider();
+        const rc = new Contract(CONTRACT_ADDRESS, ABI, rp);
         const [supply, open] = await Promise.all([
-          readContract.totalSupply().catch(() => 0n),
-          readContract.mintOpen().catch(() => false),
+          rc.totalSupply().catch(() => 0n),
+          rc.mintOpen().catch(() => false),
         ]);
         setTotalSupply(Number(supply));
         setIsMintOpen(Boolean(open));
       } catch { /* ignore */ }
     };
     fetchStats();
-    const interval = setInterval(fetchStats, 15000);
-    return () => clearInterval(interval);
+    const iv = setInterval(fetchStats, 15000);
+    return () => clearInterval(iv);
   }, []);
 
   useEffect(() => {
     const fetchBlock = async () => {
       try {
-        const readProvider = await getWorkingProvider();
-        setBlockNumber(await readProvider.getBlockNumber());
+        const rp = await getWorkingProvider();
+        setBlockNumber(await rp.getBlockNumber());
       } catch { /* ignore */ }
     };
     fetchBlock();
-    const interval = setInterval(fetchBlock, 5000);
-    return () => clearInterval(interval);
+    const iv = setInterval(fetchBlock, 5000);
+    return () => clearInterval(iv);
   }, []);
 
   useEffect(() => {
     const walletProvider = getWalletProvider();
     if (!walletProvider) return;
-    const browserProvider = new BrowserProvider(walletProvider as never);
-    setProvider(browserProvider);
-    browserProvider.getNetwork().then(n => setIsCorrectChain(Number(n.chainId) === CHAIN_ID));
+    const bp = new BrowserProvider(walletProvider as never);
+    setProvider(bp);
+    bp.getNetwork().then(n => setIsCorrectChain(Number(n.chainId) === CHAIN_ID));
 
-    const handleChainChanged = (cId: string) => setIsCorrectChain(Number(cId) === CHAIN_ID);
-    const handleAccountsChanged = (accounts: string[]) => {
-      if (accounts.length > 0) {
-        setAccount(accounts[0]);
-        browserProvider.getSigner().then(s => setSigner(s));
-      } else { setAccount(null); setSigner(null); }
+    const onChainChanged    = (cId: string)      => setIsCorrectChain(Number(cId) === CHAIN_ID);
+    const onAccountsChanged = (accs: string[])   => {
+      if (accs.length > 0) { setAccount(accs[0]); bp.getSigner().then(setSigner); }
+      else { setAccount(null); setSigner(null); }
     };
-
-    walletProvider.on('chainChanged', handleChainChanged);
-    walletProvider.on('accountsChanged', handleAccountsChanged);
-    browserProvider.listAccounts().then(accounts => {
-      if (accounts.length > 0) { setAccount(accounts[0].address); setSigner(accounts[0]); }
+    walletProvider.on('chainChanged',    onChainChanged);
+    walletProvider.on('accountsChanged', onAccountsChanged);
+    bp.listAccounts().then(accs => {
+      if (accs.length > 0) { setAccount(accs[0].address); setSigner(accs[0]); }
     });
     return () => {
-      walletProvider.removeListener('chainChanged', handleChainChanged);
-      walletProvider.removeListener('accountsChanged', handleAccountsChanged);
+      walletProvider.removeListener('chainChanged',    onChainChanged);
+      walletProvider.removeListener('accountsChanged', onAccountsChanged);
     };
   }, []);
 
   useEffect(() => {
-    setContract(signer && isCorrectChain ? new Contract(CONTRACT_ADDRESS, ABI, signer) : null);
+    setContract(signer && isCorrectChain
+      ? new Contract(CONTRACT_ADDRESS, ABI, signer) : null);
   }, [signer, isCorrectChain]);
 
   const connectWallet = async () => {
@@ -152,7 +157,7 @@ export function useBlockchain() {
       setSigner(s);
       setAccount(await s.getAddress());
       setIsCorrectChain(Number((await provider.getNetwork()).chainId) === CHAIN_ID);
-    } catch { /* user rejected */ }
+    } catch { /* rejected */ }
     finally { setIsConnecting(false); }
   };
 
@@ -161,10 +166,10 @@ export function useBlockchain() {
   };
 
   const addRitualChain = async () => {
-    const walletProvider = getWalletProvider();
-    if (!walletProvider) return;
+    const wp = getWalletProvider();
+    if (!wp) return;
     try {
-      await walletProvider.request({
+      await wp.request({
         method: 'wallet_addEthereumChain',
         params: [{
           chainId: "0x7BB",
@@ -173,29 +178,30 @@ export function useBlockchain() {
           nativeCurrency: { name: "RITUAL", symbol: "RITUAL", decimals: 18 },
         }],
       });
-    } catch { /* user rejected */ }
+    } catch { /* rejected */ }
   };
 
   // ── MINT ─────────────────────────────────────────────────────────────────────
-  // KEY: use eth_sendTransaction directly via wallet provider
-  // This bypasses ALL ethers/wagmi simulation — required for Ritual async precompiles
+  // Uses eth_sendTransaction with HARDCODED gas values.
+  // This bypasses eth_estimateGas and eth_call simulation entirely.
+  // Required for Ritual async precompile calls — standard wagmi/ethers patterns fail.
   // Reference: https://x.com/tutubearrr — Pitfall #1
   const mint = async (): Promise<ethers.TransactionResponse> => {
-    const walletProvider = getWalletProvider();
-    if (!walletProvider) throw new Error("No wallet found. Install MetaMask or OKX Wallet.");
+    const wp = getWalletProvider();
+    if (!wp) throw new Error("No wallet found. Install MetaMask or OKX Wallet.");
 
-    const browserProvider = new BrowserProvider(walletProvider as never);
+    const bp = new BrowserProvider(wp as never);
 
-    // Chain guard
-    const network = await browserProvider.getNetwork();
+    // Ensure correct chain
+    const network = await bp.getNetwork();
     if (Number(network.chainId) !== CHAIN_ID) {
       try {
-        await walletProvider.request({
+        await wp.request({
           method: 'wallet_switchEthereumChain',
           params: [{ chainId: '0x7BB' }],
         });
       } catch {
-        await walletProvider.request({
+        await wp.request({
           method: 'wallet_addEthereumChain',
           params: [{
             chainId: "0x7BB",
@@ -205,50 +211,61 @@ export function useBlockchain() {
           }],
         });
       }
-      throw new Error("Switched to Ritual Chain — please try minting again.");
+      throw new Error("Switched to Ritual Chain — please try again.");
     }
 
     // Get accounts
-    const accounts = await walletProvider.request({
-      method: 'eth_accounts',
-    }) as string[];
-
+    const accounts = await wp.request({ method: 'eth_accounts' }) as string[];
     if (!accounts || accounts.length === 0) {
-      await walletProvider.request({ method: 'eth_requestAccounts', params: [] });
-      throw new Error("Please connect your wallet first.");
+      await wp.request({ method: 'eth_requestAccounts', params: [] });
+      throw new Error("Please connect wallet and try again.");
     }
 
-    const from     = accounts[0];
-    // 0.06 RITUAL in hex wei
-    const value    = "0x" + ethers.parseEther("0.06").toString(16);
-    // 2,000,000 gas in hex — safe for Ritual async precompile calls
-    const gasLimit = "0x" + BigInt(2_000_000).toString(16);
-    // mint() function selector — keccak256("mint()")[0:4]
-    const data     = "0x1249c58b";
+    const from  = accounts[0];
+    // 0.06 RITUAL = 60000000000000000 wei
+    const value = "0x" + BigInt("60000000000000000").toString(16); // 0xD529AE9E860000
 
-    console.log("Sending mint via eth_sendTransaction (no simulation)");
-    console.log("From:", from);
-    console.log("To:", CONTRACT_ADDRESS);
-    console.log("Value:", value, "(0.06 RITUAL)");
-    console.log("Gas:", gasLimit);
+    console.log("eth_sendTransaction — hardcoded gas, no estimation");
+    console.log("from:", from);
+    console.log("to:", CONTRACT_ADDRESS);
+    console.log("value:", value, "= 0.06 RITUAL");
+    console.log("gas:", RITUAL_GAS_LIMIT, "= 2,000,000");
+    console.log("gasPrice:", RITUAL_GAS_PRICE, "= 1 gwei");
 
-    // Send raw transaction — wallet handles signing, NO eth_call simulation
-    const txHash = await walletProvider.request({
+    // Send with ALL gas params hardcoded — wallet just signs, no estimation
+    const txHash = await wp.request({
       method: 'eth_sendTransaction',
       params: [{
         from,
-        to:    CONTRACT_ADDRESS,
-        data,
+        to:       CONTRACT_ADDRESS,
+        data:     MINT_SELECTOR,      // mint() = 0x1249c58b
         value,
-        gas:   gasLimit,
+        gas:      RITUAL_GAS_LIMIT,   // 0x1E8480 = 2,000,000
+        gasPrice: RITUAL_GAS_PRICE,   // 0x3B9ACA00 = 1 gwei
       }],
     }) as string;
 
     console.log("TX submitted:", txHash);
 
-    // Fetch full tx object for return
-    const tx = await browserProvider.getTransaction(txHash);
-    if (!tx) throw new Error("TX sent but could not fetch details: " + txHash);
+    // Wait briefly then fetch tx
+    await new Promise(r => setTimeout(r, 1000));
+    const tx = await bp.getTransaction(txHash);
+    if (!tx) {
+      // Return minimal object if getTransaction fails
+      return {
+        hash: txHash,
+        wait: async () => {
+          const rp = await getWorkingProvider();
+          let receipt = null;
+          for (let i = 0; i < 60; i++) {
+            receipt = await rp.getTransactionReceipt(txHash);
+            if (receipt) return receipt;
+            await new Promise(r => setTimeout(r, 2000));
+          }
+          throw new Error("TX not confirmed after 2 minutes");
+        }
+      } as unknown as ethers.TransactionResponse;
+    }
     return tx;
   };
 
@@ -259,9 +276,9 @@ export function useBlockchain() {
     } catch { return false; }
   };
 
-  const setExecutorAndOpen = async (executorAddr: string): Promise<ethers.TransactionResponse> => {
+  const setExecutorAndOpen = async (addr: string): Promise<ethers.TransactionResponse> => {
     if (!contract) throw new Error("Contract not connected");
-    return contract.setExecutorAndOpen(executorAddr, { gasLimit: 150_000 });
+    return contract.setExecutorAndOpen(addr, { gasLimit: 200_000 });
   };
 
   const withdrawRevenue = async (): Promise<ethers.TransactionResponse> => {
@@ -272,8 +289,7 @@ export function useBlockchain() {
   const getContractBalance = async (): Promise<string> => {
     try {
       const rc = new Contract(CONTRACT_ADDRESS, ABI, await getWorkingProvider());
-      const bal = await rc.getBalance();
-      return ethers.formatEther(bal);
+      return ethers.formatEther(await rc.getBalance());
     } catch { return "0"; }
   };
 
