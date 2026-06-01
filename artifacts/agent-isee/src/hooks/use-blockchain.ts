@@ -222,12 +222,21 @@ export function useBlockchain() {
     const value = "0x" + ethers.parseEther(MINT_PRICE).toString(16);
     // 3,000,000 gas — safe for Ritual async precompile
     const gas   = "0x" + BigInt(3_000_000).toString(16);
+    
+    // Fetch dynamic gas price from Ritual RPC and add 50% margin
+    // to bypass MetaMask simulation without being underpriced
+    const rp = getReadProvider();
+    const feeData = await rp.getFeeData();
+    const currentGasPrice = feeData.gasPrice || ethers.parseUnits("1", "gwei");
+    const safeGasPrice = (currentGasPrice * 15n) / 10n; // +50%
+    const gasPriceHex = "0x" + safeGasPrice.toString(16);
 
     console.log("Sending mint via eth_sendTransaction");
     console.log("from:", account);
     console.log("to:", CONTRACT_ADDRESS);
     console.log("value:", value, "(0.06 RITUAL)");
     console.log("gas:", gas, "(3,000,000)");
+    console.log("gasPrice:", gasPriceHex);
     console.log("data:", data);
 
     const txHash = await wp.request({
@@ -238,6 +247,7 @@ export function useBlockchain() {
         data,
         value,
         gas,
+        gasPrice: gasPriceHex,
       }],
     }) as string;
 
