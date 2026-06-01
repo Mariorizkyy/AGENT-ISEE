@@ -1,21 +1,34 @@
-import { useState, useEffect, useCallback } from 'react';
-import { ethers, BrowserProvider, Contract } from 'ethers';
+import { useState, useEffect } from 'react';
+import { ethers, BrowserProvider } from 'ethers';
+
+type WalletProvider = {
+  request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+  on: (event: string, handler: (...args: unknown[]) => void) => void;
+  removeListener: (event: string, handler: (...args: unknown[]) => void) => void;
+};
 
 declare global {
   interface Window {
-    ethereum?: {
-      request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
-      on: (event: string, handler: (...args: unknown[]) => void) => void;
-      removeListener: (event: string, handler: (...args: unknown[]) => void) => void;
-    };
+    ethereum?: WalletProvider;
+    okxwallet?: WalletProvider;
   }
+}
+
+function getWalletProvider(): WalletProvider | null {
+  if (typeof window !== 'undefined') {
+    if (typeof window.okxwallet !== 'undefined') return window.okxwallet!;
+    if (typeof window.ethereum  !== 'undefined') return window.ethereum!;
+  }
+  return null;
 }
 
 export const CONTRACT_ADDRESS = "0xaC9443A8FE8D6CABBcA820A66FAE2810EC8e8688";
 export const OWNER_ADDRESS    = "0x419fa2f1991b06b0ab25bac2341765b38ca16178";
 export const CHAIN_ID         = 1979;
 export const MINT_PRICE       = "0.06";
-export const RPC_URL          = "https://rpc.ritualfoundation.org";
+
+const RPC_URLS = ["https://rpc.ritualfoundation.org"];
+export const RPC_URL = RPC_URLS[0];
 
 export const ABI = [
   "function mint() payable",
@@ -25,160 +38,201 @@ export const ABI = [
   "function tokenImageURI(uint256) view returns (string)",
   "function tokenRevealed(uint256) view returns (bool)",
   "function setExecutorAndOpen(address _executor) external",
-  "function setExecutor(address _executor) external",
-  "function openMint() external",
-  "function pauseMint() external",
   "function withdraw() external",
   "function getBalance() view returns (uint256)",
-  "function owner() view returns (address)",
-  "event MintInitiated(uint256 indexed tokenId, address indexed minter, bytes32 llmJobId)",
-  "event PromptGenerated(uint256 indexed tokenId, string prompt, bytes32 imgJobId)",
-  "event ArtRevealed(uint256 indexed tokenId, string imageURI)",
 ];
 
+function encodeCall(functionSignature: string, args: unknown[] = []): string {
+  const iface = new ethers.Interface(ABI);
+  const funcName = functionSignature.split('(')[0];
+  return iface.encodeFunctionData(funcName, args);
+}
+
 export function useBlockchain() {
-  const [provider, setProvider]           = useState<BrowserProvider | null>(null);
-  const [signer, setSigner]               = useState<ethers.Signer | null>(null);
-  const [account, setAccount]             = useState<string | null>(null);
-  const [contract, setContract]           = useState<Contract | null>(null);
-  const [blockNumber, setBlockNumber]     = useState<number>(0);
-  const [totalSupply, setTotalSupply]     = useState<number>(0);
-  const [isMintOpen, setIsMintOpen]       = useState<boolean>(false);
-  const [isCorrectChain, setIsCorrectChain] = useState<boolean>(false);
-  const [isConnecting, setIsConnecting]   = useState(false);
+  const [provider, setProvider]     = useState<BrowserProvider | null>(null);
+  const [signer, setSigner]         = useState<ethers.Signer | null>(null);
+  const [account, setAccount]       = useState<string | null>(null);
+  const [isMintOpen, setIsMintOpen] = useState<boolean>(false);
+  const [totalSupply, setTotalSupply] = useState<number>(0);
+  const [isConnecting, setIsConnecting] = useState<boolean>(false);
+  const [chainId, setChainId]       = useState<number | null>(null);
+  const [error, setError]           = useState<string | null>(null);
 
-  const isOwner = account?.toLowerCase() === OWNER_ADDRESS.toLowerCase();
+  const refreshContractState = async () => {
+    try {
+      const p = new ethers.JsonRpcProvider(RPC_URL, { chainId: CHAIN_ID, name: "ritual" });
+      const c = new ethers.Contract(CONTRACT_ADDRESS, ABI, p);
+      const [mintOpenVal, supplyVal] = await Promise.all([
+        c.mintOpen(),
+        c.totalSupply(),
+      ]);
+      setIsMintOpen(Boolean(mintOpenVal));
+      setTotalSupply(Number(supplyVal));
+    } catch (e: any) {
+      console.warn("Gagal membaca state contract:", e.message);
+    }
+  };
 
-  // Poll supply + mint status
   useEffect(() => {
-    const readProvider = new ethers.JsonRpcProvider(RPC_URL);
-    const readContract = new Contract(CONTRACT_ADDRESS, ABI, readProvider);
-
-    const fetchStats = async () => {
-      try {
-        const [supply, open] = await Promise.all([
-          readContract.totalSupply().catch(() => 0n),
-          readContract.mintOpen().catch(() => false),
-        ]);
-        setTotalSupply(Number(supply));
-        setIsMintOpen(Boolean(open));
-      } catch { /* ignore */ }
-    };
-
-    fetchStats();
-    const interval = setInterval(fetchStats, 10000);
-    return () => clearInterval(interval);
+    refreshContractState();
+    const iv = setInterval(refreshContractState, 15000);
+    return () => clearInterval(iv);
   }, []);
-
-  // Poll block number
-  useEffect(() => {
-    const readProvider = new ethers.JsonRpcProvider(RPC_URL);
-    const fetchBlock = async () => {
-      try { setBlockNumber(await readProvider.getBlockNumber()); } catch { /* ignore */ }
-    };
-    fetchBlock();
-    const interval = setInterval(fetchBlock, 1400);
-    return () => clearInterval(interval);
-  }, []);
-
-  // Wire up MetaMask
-  useEffect(() => {
-    if (!window.ethereum) return;
-    const browserProvider = new BrowserProvider(window.ethereum);
-    setProvider(browserProvider);
-
-    browserProvider.getNetwork().then(n => setIsCorrectChain(Number(n.chainId) === CHAIN_ID));
-
-    const handleChainChanged    = (cId: string) => setIsCorrectChain(Number(cId) === CHAIN_ID);
-    const handleAccountsChanged = (accounts: string[]) => {
-      if (accounts.length > 0) {
-        setAccount(accounts[0]);
-        browserProvider.getSigner().then(s => setSigner(s));
-      } else {
-        setAccount(null); setSigner(null);
-      }
-    };
-
-    window.ethereum.on('chainChanged', handleChainChanged);
-    window.ethereum.on('accountsChanged', handleAccountsChanged);
-
-    browserProvider.listAccounts().then(accounts => {
-      if (accounts.length > 0) {
-        setAccount(accounts[0].address ?? accounts[0]);
-        browserProvider.getSigner().then(s => setSigner(s));
-      }
-    });
-
-    return () => {
-      window.ethereum?.removeListener('chainChanged', handleChainChanged);
-      window.ethereum?.removeListener('accountsChanged', handleAccountsChanged);
-    };
-  }, []);
-
-  useEffect(() => {
-    setContract(signer && isCorrectChain ? new Contract(CONTRACT_ADDRESS, ABI, signer) : null);
-  }, [signer, isCorrectChain]);
 
   const connectWallet = async () => {
-    if (!provider) return;
     setIsConnecting(true);
+    setError(null);
     try {
-      await provider.send("eth_requestAccounts", []);
-      const s = await provider.getSigner();
-      setSigner(s);
-      setAccount(await s.getAddress());
-      setIsCorrectChain(Number((await provider.getNetwork()).chainId) === CHAIN_ID);
-    } catch { /* user rejected */ }
-    finally { setIsConnecting(false); }
+      const walletProvider = getWalletProvider();
+      if (!walletProvider) throw new Error("Wallet tidak terdeteksi.");
+
+      await walletProvider.request({ method: 'eth_requestAccounts' });
+
+      const browserProvider = new BrowserProvider(walletProvider as any);
+      const network = await browserProvider.getNetwork();
+
+      if (Number(network.chainId) !== CHAIN_ID) {
+        await addRitualChain();
+      }
+
+      const signerInstance = await browserProvider.getSigner();
+      const accountAddress = await signerInstance.getAddress();
+      const networkAfter   = await browserProvider.getNetwork();
+
+      setProvider(browserProvider);
+      setSigner(signerInstance);
+      setAccount(accountAddress);
+      setChainId(Number(networkAfter.chainId));
+
+      walletProvider.on('accountsChanged', (accounts: unknown) => {
+        const accs = accounts as string[];
+        if (accs.length === 0) setAccount(null);
+        else setAccount(accs[0]);
+      });
+      walletProvider.on('chainChanged', () => window.location.reload());
+    } catch (e: any) {
+      setError(e.shortMessage || e.message);
+    } finally {
+      setIsConnecting(false);
+    }
   };
 
   const addRitualChain = async () => {
-    if (!window.ethereum) return;
+    const walletProvider = getWalletProvider();
+    if (!walletProvider) return;
     try {
-      await window.ethereum.request({
-        method: 'wallet_addEthereumChain',
-        params: [{ chainId: "0x7BB", chainName: "Ritual", rpcUrls: [RPC_URL], nativeCurrency: { name: "RITUAL", symbol: "RITUAL", decimals: 18 } }],
+      await walletProvider.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: `0x${CHAIN_ID.toString(16)}` }],
       });
-    } catch { /* ignore */ }
+    } catch (switchErr: any) {
+      if (switchErr.code === 4902) {
+        await walletProvider.request({
+          method: 'wallet_addEthereumChain',
+          params: [{
+            chainId: `0x${CHAIN_ID.toString(16)}`,
+            chainName: 'Ritual Chain',
+            nativeCurrency: { name: 'RITUAL', symbol: 'RITUAL', decimals: 18 },
+            rpcUrls: [RPC_URL],
+            blockExplorerUrls: ['https://explorer.ritualfoundation.org'],
+          }],
+        });
+      } else {
+        throw switchErr;
+      }
+    }
   };
 
-  const mint = async (): Promise<ethers.TransactionResponse> => {
-    if (!contract) throw new Error("Contract not connected");
-    return contract.mint({ value: ethers.parseEther(MINT_PRICE) });
+  const mint = async (): Promise<{ hash: string, wait: () => Promise<any> }> => {
+    if (!account || !provider) throw new Error("Wallet belum terkoneksi.");
+    if (!isMintOpen) throw new Error("Minting belum diaktifkan.");
+
+    const data = encodeCall("mint()", []);
+    const walletProvider = getWalletProvider();
+    if (!walletProvider) throw new Error("Provider hilang");
+
+    // SOLUSI TUTUBEAR PITFALL #1:
+    // Gunakan eth_sendTransaction mentah dengan gas limit explicit untuk membypass eth_estimateGas.
+    // Kita TIDAK menambahkan chainId atau gasPrice di sini agar wallet menggunakan default jaringannya.
+    const txHash = await walletProvider.request({
+      method: 'eth_sendTransaction',
+      params: [{
+        from: account,
+        to: CONTRACT_ADDRESS,
+        data: data,
+        value: "0x" + BigInt(ethers.parseEther(MINT_PRICE)).toString(16),
+        gas: "0x" + BigInt(3000000).toString(16),
+      }]
+    }) as string;
+
+    return { 
+      hash: txHash, 
+      wait: async () => provider.waitForTransaction(txHash) 
+    };
   };
 
-  const checkReveal = async (tokenId: number): Promise<boolean> => {
-    try {
-      const rc = new Contract(CONTRACT_ADDRESS, ABI, new ethers.JsonRpcProvider(RPC_URL));
-      return Boolean(await rc.tokenRevealed(tokenId));
-    } catch { return false; }
+  const setExecutorAndOpen = async (executorAddress: string): Promise<{ hash: string, wait: () => Promise<any> }> => {
+    if (!account || !provider) throw new Error("Wallet belum terkoneksi.");
+    
+    const data = encodeCall("setExecutorAndOpen(address)", [executorAddress]);
+    const walletProvider = getWalletProvider();
+    
+    const txHash = await walletProvider!.request({
+      method: 'eth_sendTransaction',
+      params: [{
+        from: account,
+        to: CONTRACT_ADDRESS,
+        data: data,
+        gas: "0x" + BigInt(2000000).toString(16),
+      }]
+    }) as string;
+
+    return { hash: txHash, wait: async () => provider.waitForTransaction(txHash) };
   };
 
-  // Owner-only actions
-  const setExecutorAndOpen = async (executorAddr: string): Promise<ethers.TransactionResponse> => {
-    if (!contract) throw new Error("Contract not connected");
-    return contract.setExecutorAndOpen(executorAddr, { gasLimit: 150_000 });
-  };
+  const withdrawRevenue = async (): Promise<{ hash: string, wait: () => Promise<any> }> => {
+    if (!account || !provider) throw new Error("Wallet belum terkoneksi.");
+    
+    const data = encodeCall("withdraw()", []);
+    const walletProvider = getWalletProvider();
+    
+    const txHash = await walletProvider!.request({
+      method: 'eth_sendTransaction',
+      params: [{
+        from: account,
+        to: CONTRACT_ADDRESS,
+        data: data,
+        gas: "0x" + BigInt(500000).toString(16),
+      }]
+    }) as string;
 
-  const withdrawRevenue = async (): Promise<ethers.TransactionResponse> => {
-    if (!contract) throw new Error("Contract not connected");
-    return contract.withdraw({ gasLimit: 100_000 });
+    return { hash: txHash, wait: async () => provider.waitForTransaction(txHash) };
   };
 
   const getContractBalance = async (): Promise<string> => {
     try {
-      const rc = new Contract(CONTRACT_ADDRESS, ABI, new ethers.JsonRpcProvider(RPC_URL));
-      const bal = await rc.getBalance();
-      return ethers.formatEther(bal);
+      const p = new ethers.JsonRpcProvider(RPC_URL, { chainId: CHAIN_ID, name: "ritual" });
+      const c = new ethers.Contract(CONTRACT_ADDRESS, ABI, p);
+      return ethers.formatEther(await c.getBalance());
     } catch { return "0"; }
   };
 
+  const checkReveal = async (tokenId: number): Promise<boolean> => {
+    try {
+      const p = new ethers.JsonRpcProvider(RPC_URL, { chainId: CHAIN_ID, name: "ritual" });
+      const c = new ethers.Contract(CONTRACT_ADDRESS, ABI, p);
+      const revealed = await c.tokenRevealed(tokenId);
+      return revealed;
+    } catch { return false; }
+  };
+
+  const isOwner = account?.toLowerCase() === OWNER_ADDRESS.toLowerCase();
+  const isCorrectChain = chainId === CHAIN_ID;
+
   return {
-    provider, account, contract, blockNumber,
-    totalSupply, isMintOpen, isCorrectChain,
-    isOwner, isConnecting,
-    connectWallet, addRitualChain,
-    mint, checkReveal,
-    setExecutorAndOpen, withdrawRevenue, getContractBalance,
+    provider, signer, account, isMintOpen, totalSupply, isConnecting,
+    chainId, error, isOwner, isCorrectChain,
+    connectWallet, addRitualChain, mint, setExecutorAndOpen,
+    withdrawRevenue, getContractBalance, checkReveal, refreshContractState,
   };
 }
