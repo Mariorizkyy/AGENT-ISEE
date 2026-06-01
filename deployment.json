@@ -1,8 +1,8 @@
 {
-  "contract": "0x0b42a53da5614796cFFE2a0390E89299004bB093",
+  "contract": "0x294F053079d76b29529cf855eEC2729E6214BFa5",
   "owner": "0x419fa2f1991b06b0ab25bac2341765b38ca16178",
   "executor": "0x4Ad6561cB079b054d23eBce2FF9bE6447df34Ecb",
   "chain": 1979,
   "rpc": "https://rpc.ritualfoundation.org",
-  "deployedAt": "2026-06-01T13:16:04.250Z"
+  "deployedAt": "2026-06-01T14:41:47.729Z"
 }
