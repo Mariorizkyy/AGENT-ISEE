@@ -27,7 +27,7 @@ export function shortenAddress(addr: string): string {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
-export const CONTRACT_ADDRESS = "0xaC9443A8FE8D6CABBcA820A66FAE2810EC8e8688";
+export const CONTRACT_ADDRESS = "0x0b42a53da5614796cFFE2a0390E89299004bB093";
 export const OWNER_ADDRESS    = "0x419fa2f1991b06b0ab25bac2341765b38ca16178";
 export const CHAIN_ID         = 1979;
 export const CHAIN_ID_HEX     = "0x7BB";
