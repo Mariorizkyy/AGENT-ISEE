@@ -164,7 +164,6 @@ export function useBlockchain() {
         data: data,
         value: "0x" + BigInt(ethers.parseEther(MINT_PRICE)).toString(16),
         gas: "0x" + BigInt(3000000).toString(16),
-        gasPrice: "0x3B9ACA00" // 1 Gwei - Forcing gas price to prevent silent drop
       }]
     }) as string;
 
